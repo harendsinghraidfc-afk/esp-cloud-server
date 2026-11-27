@@ -2,17 +2,41 @@
 
 Server: `~/workspace/esp-cloud-server/server.js`. Firmware side:
 `~/workspace/wifi/src/modules/CloudLink.{h,cpp}` and
-`~/workspace/wifi/src/core/ConfigStore.h` (`cloud.baseUrl`,
-`secrets.cloudToken`). The device is behind NAT, so **the device always
-dials out** — the cloud never connects in to it.
+`~/workspace/wifi/src/core/ConfigStore.h` (`cloud.baseUrl`). The device
+is behind NAT, so **the device always dials out** — the cloud never
+connects in to it.
 
 Device configuration (admin panel > System > Cloud, or
 `POST /api/system/cloud` on the device):
 - `baseUrl`: the cloud server base URL, e.g. `https://esp-router-cloud.onrender.com`
-  (http:// for local testing, e.g. `http://192.168.1.50:3000`). Empty = all
-  cloud features disabled (default).
-- `cloudToken`: the device token, must equal the server's `DEVICE_TOKEN`.
-  Never shown in the panel and never sent anywhere except to the cloud.
+  (http:// for local testing, e.g. `http://192.168.1.50:3000`). Default is
+  the Render URL baked into the firmware; empty = all cloud features
+  disabled.
+- No token, no password, nothing else to enter: the device authenticates
+  with its unique **chip ID** (see §0).
+
+## 0. Auth — chip ID + first-connect auto-pairing (no tokens)
+
+The device identifies itself with its chip ID: the ESP32 eFuse MAC as
+12 lowercase hex digits (e.g. `a1b2c3d4e5f6`), shown in the panel under
+System > Cloud connection. It is sent:
+- in the hello frame (`"chipId"`),
+- as an `X-Device-Id` header on `GET /ota/manifest.json` and
+  `POST /logs` (also accepted as `chipId` in the log-upload JSON body).
+
+The server **auto-pairs the first chip ID that connects** — on any of
+`/link`, `/logs` or `/ota/manifest.json` — stores it in
+`data/devices.json` (`{"chipId","device","pairedAt"}`, survives restarts),
+and afterwards **only accepts that chip ID** on those three endpoints
+(anything else gets `401` on HTTP, or `{"type":"auth","ok":false}` and a
+closed socket on `/link`).
+
+To pair a **different device**: power the old device off first (otherwise
+it re-pairs on reconnect), then either delete `data/devices.json` and
+restart the server, or call `POST /api/devices/unpair` with the admin
+token — that clears the pairing and drops the live link, so the next chip
+ID that connects pairs instead. `GET /api/devices` (admin token) shows
+the currently paired chip ID.
 
 ## 1. Live link — WebSocket
 
@@ -24,17 +48,18 @@ alias for `/link`.)
 After the WS handshake the device sends:
 
 ```json
-{"type":"hello","device":"esp-router","version":"0.3.0","board":"esp32dev","token":"<DEVICE_TOKEN>"}
+{"type":"hello","device":"esp-router","chipId":"a1b2c3d4e5f6","version":"0.3.0","board":"esp32dev"}
 ```
 
 `board` is `esp32c5` when the chip model contains "C5", else `esp32dev`.
-The server verifies the token and replies:
+The server pairs/authenticates the chip ID (see §0) and replies:
 
 ```json
 {"type":"auth","ok":true}
 ```
 
-(`ok:false` and the socket is closed when the token is wrong.) The device
+(`ok:false` and the socket is closed when the chip ID is missing,
+malformed, or not the paired one.) The device
 executes **no** command before `auth.ok == true`. It sends a WS ping frame
 every 30 s and drops the link if nothing is received for 90 s; the server
 also sends `{"type":"ping"}` every 30 s and the device replies
@@ -64,7 +89,7 @@ On failure: `{"type":"result","id":"c1","ok":false,"error":"..."}`.
 | `factory_reset` | `confirm:true` (required) | replies ok, factory-resets + reboots |
 | `ota_check` | — | triggers a manifest check now; `state.ota` = OTA status |
 | `ota_update` | — | same as `ota_check` (check → download → install if newer) |
-| `cloud_set` | `baseUrl`, `token?` | changes cloud URL/token, reconnects |
+| `cloud_set` | `baseUrl` | changes cloud URL, reconnects |
 | `client_block` / `client_unblock` | `mac` | block/unblock a client by MAC |
 | `client_rename` | `mac`, `name` | rename a client |
 | `client_limit` | `mac`, `kbps` (0=none), `capMB` (0=none) | per-client speed/data limit |
@@ -86,7 +111,8 @@ the configured portal webhook instead.
 ## 2. Cloud OTA — HTTP
 
 Hourly (first check ~60 s after boot, also on `ota_check` / panel trigger)
-the device does `GET <baseUrl>/ota/manifest.json`:
+the device does `GET <baseUrl>/ota/manifest.json` with an
+`X-Device-Id: <chipId>` header (missing/unknown chip ID → `401`, see §0):
 
 ```json
 {
@@ -110,16 +136,17 @@ the device does `GET <baseUrl>/ota/manifest.json`:
 ## 3. Cloud logs — HTTP
 
 Every 30 s the device does `POST <baseUrl>/logs` with
-`Content-Type: application/json` and `Authorization: Bearer <DEVICE_TOKEN>`:
+`Content-Type: application/json` and an `X-Device-Id: <chipId>` header
+(missing/unknown chip ID → `401`, see §0):
 
 ```json
-{"device":"esp-router","version":"0.3.0","lines":[{"seq":12,"ms":123456,"level":"I","msg":"WAN connected: 192.168.1.5"}]}
+{"device":"esp-router","chipId":"a1b2c3d4e5f6","version":"0.3.0","lines":[{"seq":12,"ms":123456,"level":"I","msg":"WAN connected: 192.168.1.5"}]}
 ```
 
 `lines` are LogBuffer entries since the last push (`seq` = ring sequence,
 `ms` = device uptime ms, `level` = `I`/`W`/`E`/`D`/`V`, `msg` = text).
 The server must answer 2xx. (`POST /api/logs` on the server is the same
-endpoint; it also accepts the token as `X-Device-Token`.)
+endpoint; the chip ID is also accepted in the JSON body as `chipId`.)
 
 ## 4. Control clients (Muse / admin)
 

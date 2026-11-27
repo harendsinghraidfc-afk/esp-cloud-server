@@ -4,24 +4,32 @@
  *
  * Matches the firmware protocol in wifi/src/modules/CloudLink.{h,cpp}:
  *   - Device WebSocket link:  WS(S) <base>/link
- *       device -> {"type":"hello","device","version","board","token"}
+ *       device -> {"type":"hello","device","chipId","version","board"}
  *       server -> {"type":"auth","ok":true|false}
  *       server -> {"type":"command","id","cmd",...params}
  *       device -> {"type":"result","id","ok","error","state"}
  *       device -> {"type":"alert","alert","message","device"}
- *   - Cloud OTA:  GET <base>/ota/manifest.json
+ *   - Cloud OTA:  GET <base>/ota/manifest.json  (X-Device-Id header)
  *       {"version","esp32dev":{"url","size","sha256"},"esp32c5":{...}}
- *   - Cloud logs: POST <base>/logs  (Authorization: Bearer <DEVICE_TOKEN>)
- *       {"device","version","lines":[{"seq","ms","level","msg"}]}
+ *   - Cloud logs: POST <base>/logs  (X-Device-Id header)
+ *       {"device","chipId","version","lines":[{"seq","ms","level","msg"}]}
+ *
+ * Auth is TOKEN-FREE for devices: the device identifies itself with its
+ * unique chip ID (ESP32 eFuse MAC, 12 hex digits). The server
+ * auto-pairs the FIRST chip ID that connects (stored in
+ * data/devices.json, survives restarts) and afterwards only accepts
+ * that chip ID on /link, /logs and /ota/manifest.json (401 / socket
+ * close for anything else). To pair a different device, power the old
+ * one off and call POST /api/devices/unpair (admin token) or delete
+ * data/devices.json and restart.
  *
  * Extra admin/control surface (not used by the firmware):
  *   - GET  /health, GET /api/ota/manifest?board=, GET /firmware/:board/firmware.bin
- *   - POST /api/logs (alias of /logs, also accepts X-Device-Token)
- *   - GET  /api/logs?limit=, GET /api/devices
+ *   - GET  /api/logs?limit=, GET /api/devices, POST /api/devices/unpair
  *   - WS   /ws/device (alias of /link), WS /ws/control
  *   - GET  /  tiny admin page
  *
- * Env: PORT (Render sets it), DEVICE_TOKEN, ADMIN_TOKEN.
+ * Env: PORT (Render sets it), ADMIN_TOKEN.
  * Deps: only "ws". Plain Node http for everything else.
  */
 const http = require('http');
@@ -31,19 +39,16 @@ const crypto = require('crypto');
 const { WebSocketServer } = require('ws');
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
-const DEVICE_TOKEN = process.env.DEVICE_TOKEN || 'esp-router-dev-token';
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || ''; // empty = /api/logs + /api/devices + /ws/control open (dev only)
 const VERSION = '0.3.0'; // must match -DESP_ROUTER_VERSION in wifi/platformio.ini
 const BOARDS = ['esp32dev', 'esp32c5'];
 const ROOT = __dirname;
 const DATA_DIR = path.join(ROOT, 'data');
 const LOG_FILE = path.join(DATA_DIR, 'logs.jsonl');
+const PAIRING_FILE = path.join(DATA_DIR, 'devices.json');
 const MAX_LOGS = 1000;
 const COMMAND_TIMEOUT_MS = 30000;
 
-if (!process.env.DEVICE_TOKEN) {
-  console.warn('[warn] DEVICE_TOKEN not set, using default dev token "esp-router-dev-token" - CHANGE IT on Render.');
-}
 if (!ADMIN_TOKEN) console.warn('[warn] ADMIN_TOKEN not set, admin endpoints are open - set one on Render.');
 
 // ---------------------------------------------------------------- firmware
@@ -89,6 +94,59 @@ try {
   }
 } catch (e) { console.warn('[warn] could not restore logs:', e.message); }
 
+// ---------------------------------------------------------------- pairing
+// Token-free device auth: the server pairs the FIRST chip ID that
+// connects and afterwards only accepts that one. Persisted in
+// data/devices.json so a restart does not re-open pairing.
+let paired = null; // {chipId, device, pairedAt}
+
+function loadPairing() {
+  try {
+    if (fs.existsSync(PAIRING_FILE)) {
+      const p = JSON.parse(fs.readFileSync(PAIRING_FILE, 'utf8'));
+      if (p && /^[0-9a-f]{12}$/i.test(p.chipId || '')) {
+        paired = { chipId: String(p.chipId).toLowerCase(), device: String(p.device || ''), pairedAt: String(p.pairedAt || '') };
+        console.log(`[pair] restored paired device: chip ${paired.chipId} (${paired.device || 'unnamed'})`);
+      }
+    }
+  } catch (e) { console.warn('[warn] could not load pairing:', e.message); }
+}
+
+function savePairing() {
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.writeFileSync(PAIRING_FILE, JSON.stringify(paired) + '\n');
+  } catch (e) { console.warn('[warn] could not save pairing:', e.message); }
+}
+
+function clearPairing() {
+  paired = null;
+  try { if (fs.existsSync(PAIRING_FILE)) fs.unlinkSync(PAIRING_FILE); } catch (e) {}
+}
+
+function normalizeChipId(v) {
+  const s = String(v || '').trim().toLowerCase();
+  return /^[0-9a-f]{12}$/.test(s) ? s : '';
+}
+
+// Authorize a device by chip ID. First valid chip ID auto-pairs;
+// afterwards only the paired chip ID is accepted.
+// Returns {ok, chipId, pairedNow} or {ok:false, error}.
+function authorizeDevice(chipId) {
+  const id = normalizeChipId(chipId);
+  if (!id) return { ok: false, error: 'missing or invalid chip id' };
+  if (!paired) {
+    paired = { chipId: id, device: '', pairedAt: new Date().toISOString() };
+    savePairing();
+    console.log(`[pair] first device paired: chip ${id}`);
+    return { ok: true, chipId: id, pairedNow: true };
+  }
+  if (paired.chipId !== id) return { ok: false, error: 'unknown device (not the paired chip id)' };
+  return { ok: true, chipId: id, pairedNow: false };
+}
+
+loadPairing();
+
 // ---------------------------------------------------------------- helpers
 function baseUrlOf(req) {
   const proto = (req.headers['x-forwarded-proto'] || 'http').split(',')[0].trim();
@@ -128,10 +186,11 @@ function readJsonBody(req, limit = 1024 * 1024) {
   });
 }
 
-function deviceTokenOf(req) {
-  const auth = req.headers.authorization || '';
-  if (auth.startsWith('Bearer ')) return auth.slice(7).trim();
-  return (req.headers['x-device-token'] || '').trim();
+function deviceIdOf(req, body) {
+  const h = (req.headers['x-device-id'] || '').trim();
+  if (h) return h;
+  if (body && typeof body.chipId === 'string') return body.chipId.trim();
+  return '';
 }
 
 function adminOk(req, url) {
@@ -144,7 +203,7 @@ function adminOk(req, url) {
 
 function publicDevices() {
   return [...devices.values()].map((d) => ({
-    device: d.name, board: d.board, version: d.version,
+    device: d.name, chipId: d.chipId || null, board: d.board, version: d.version,
     online: !!d.ws && d.ws.readyState === 1,
     lastSeen: d.lastSeen ? new Date(d.lastSeen).toISOString() : null,
     ip: d.ip, stats: d.stats || null,
@@ -173,7 +232,11 @@ const server = http.createServer(async (req, res) => {
     }
 
     // Firmware OTA manifest (exact path the device fetches).
+    // Chip-ID auth: the first chip ID that asks auto-pairs; afterwards
+    // only the paired chip ID gets the manifest.
     if (req.method === 'GET' && p === '/ota/manifest.json') {
+      const auth = authorizeDevice(req.headers['x-device-id'] || '');
+      if (!auth.ok) return sendJson(res, 401, { ok: false, error: auth.error });
       return sendJson(res, 200, manifestFor(req));
     }
 
@@ -202,16 +265,17 @@ const server = http.createServer(async (req, res) => {
       return fs.createReadStream(fw.file).pipe(res);
     }
 
-    // Device log upload: firmware POSTs here every 30 s (Bearer token).
-    // /api/logs is the same endpoint with X-Device-Token also accepted.
+    // Device log upload: firmware POSTs here every 30 s, identified by
+    // X-Device-Id (chip ID). /api/logs is the same endpoint.
     if (req.method === 'POST' && (p === '/logs' || p === '/api/logs')) {
-      if (deviceTokenOf(req) !== DEVICE_TOKEN) return sendJson(res, 401, { ok: false, error: 'bad device token' });
       const body = await readJsonBody(req);
+      const auth = authorizeDevice(deviceIdOf(req, body));
+      if (!auth.ok) return sendJson(res, 401, { ok: false, error: auth.error });
       const lines = Array.isArray(body.lines) ? body.lines : [];
       const now = new Date().toISOString();
       for (const l of lines) {
         storeLog({
-          ts: now, device: body.device || 'unknown', version: body.version || '',
+          ts: now, device: body.device || 'unknown', chipId: auth.chipId, version: body.version || '',
           seq: l.seq ?? null, ms: l.ms ?? null, level: l.level || 'I', msg: String(l.msg ?? ''),
         });
       }
@@ -226,7 +290,22 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'GET' && p === '/api/devices') {
       if (!adminOk(req, url)) return sendJson(res, 401, { ok: false, error: 'bad admin token' });
-      return sendJson(res, 200, { devices: publicDevices() });
+      return sendJson(res, 200, { devices: publicDevices(), paired: paired || null });
+    }
+
+    // Unpair the device (admin only): clears data/devices.json and drops
+    // the live link, so the NEXT chip ID that connects pairs instead.
+    // Power the old device off first, otherwise it re-pairs on reconnect.
+    if (req.method === 'POST' && p === '/api/devices/unpair') {
+      if (!adminOk(req, url)) return sendJson(res, 401, { ok: false, error: 'bad admin token' });
+      const old = paired;
+      clearPairing();
+      for (const d of devices.values()) {
+        try { d.ws.close(4004, 'unpaired by admin'); } catch (e) {}
+      }
+      devices.clear();
+      console.log(`[pair] unpaired ${old ? old.chipId : '(none)'} - pairing is open again`);
+      return sendJson(res, 200, { ok: true, unpaired: old || null });
     }
 
     return sendJson(res, 404, { ok: false, error: 'not found' });
@@ -302,21 +381,30 @@ function handleDeviceSocket(ws, req) {
     let msg;
     try { msg = JSON.parse(data.toString()); } catch (e) { return; }
     if (!device) {
-      // First message must be the hello with the device token.
-      if (msg.type !== 'hello' || msg.token !== DEVICE_TOKEN) {
-        try { ws.send(JSON.stringify({ type: 'auth', ok: false })); } catch (e) {}
-        ws.close(4003, 'bad token');
+      // First message must be the hello with the device chip ID.
+      // First chip ID ever seen auto-pairs; afterwards only that chip
+      // ID is accepted (see authorizeDevice above).
+      if (msg.type !== 'hello') {
+        try { ws.send(JSON.stringify({ type: 'auth', ok: false, error: 'first message must be hello' })); } catch (e) {}
+        ws.close(4003, 'no hello');
+        return;
+      }
+      const auth = authorizeDevice(msg.chipId);
+      if (!auth.ok) {
+        try { ws.send(JSON.stringify({ type: 'auth', ok: false, error: auth.error })); } catch (e) {}
+        ws.close(4003, 'unknown device');
         return;
       }
       clearTimeout(helloTimer);
       device = {
-        name: String(msg.device || 'unknown'), board: String(msg.board || ''),
+        name: String(msg.device || 'unknown'), chipId: auth.chipId, board: String(msg.board || ''),
         version: String(msg.version || ''), ip, lastSeen: Date.now(), ws, stats: null,
       };
+      if (paired) { paired.device = device.name; savePairing(); }
       devices.set(device.name, device);
       ws.send(JSON.stringify({ type: 'auth', ok: true }));
-      console.log(`[device] ${device.name} (${device.board} ${device.version}) online from ${ip}`);
-      broadcastControl({ type: 'device', device: device.name, online: true, board: device.board, version: device.version });
+      console.log(`[device] ${device.name} (chip ${device.chipId}, ${device.board} ${device.version}) online from ${ip}`);
+      broadcastControl({ type: 'device', device: device.name, chipId: device.chipId, online: true, board: device.board, version: device.version });
       return;
     }
     device.lastSeen = Date.now();

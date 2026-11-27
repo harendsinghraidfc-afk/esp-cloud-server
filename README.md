@@ -11,15 +11,24 @@ firmware's `CloudLink` module, not the other way round.
 | Endpoint | Purpose |
 |---|---|
 | `GET /health` | `{"ok":true}` |
-| `GET /ota/manifest.json` | OTA manifest the firmware fetches hourly (`version` + per-board `url`/`size`/`sha256`) |
+| `GET /ota/manifest.json` | OTA manifest the firmware fetches hourly (`version` + per-board `url`/`size`/`sha256`) — chip-ID auth (`X-Device-Id`) |
 | `GET /api/ota/manifest?board=esp32dev\|esp32c5` | Same manifest for one board (admin use) |
-| `GET /firmware/:board/firmware.bin` | Firmware binary download |
-| `POST /logs` / `POST /api/logs` | Device log upload (`Authorization: Bearer <DEVICE_TOKEN>` or `X-Device-Token`) |
+| `GET /firmware/:board/firmware.bin` | Firmware binary download (open — the firmware is public) |
+| `POST /logs` / `POST /api/logs` | Device log upload (chip-ID auth: `X-Device-Id` header or `chipId` in body) |
 | `GET /api/logs?limit=100` | Recent logs (admin token if set) |
-| `GET /api/devices` | Online devices, last-seen, board, version, IP (admin token if set) |
+| `GET /api/devices` | Online devices, paired chip ID, last-seen, board, version, IP (admin token if set) |
+| `POST /api/devices/unpair` | Clear the pairing (admin token) — next chip ID that connects pairs instead |
 | `WS /link` (alias `/ws/device`) | Device link: hello/auth, commands, results, alerts |
 | `WS /ws/control?token=<ADMIN_TOKEN>` | Control clients: send `{id, device, command, params}` |
 | `GET /` | Tiny admin page (devices, logs, send a command) |
+
+**Auth — no device token.** The device identifies itself with its unique
+chip ID (ESP32 eFuse MAC, 12 hex digits). The server auto-pairs the first
+chip ID that connects (stored in `data/devices.json`, survives restarts)
+and afterwards only accepts that chip ID on `/link`, `/logs` and
+`/ota/manifest.json`. To pair a different device, power the old one off
+and call `POST /api/devices/unpair` (admin token) or delete
+`data/devices.json` and restart.
 
 Firmware served right now: **version 0.3.0** (from
 `wifi/platformio.ini` `-DESP_ROUTER_VERSION="0.3.0"`).
@@ -35,7 +44,7 @@ and self-update when the version is newer.
 
 ```sh
 npm install
-DEVICE_TOKEN=esp-router-dev-token ADMIN_TOKEN=admin-secret PORT=3000 npm start
+ADMIN_TOKEN=admin-secret PORT=3000 npm start
 ```
 
 ## Deploy on Render (Anit's account)
@@ -44,19 +53,20 @@ DEVICE_TOKEN=esp-router-dev-token ADMIN_TOKEN=admin-secret PORT=3000 npm start
    `render.yaml` in this folder — service `esp-router-cloud`, Node, free
    plan, Singapore region, build `npm install`, start `node server.js`).
 2. In the Render service settings set environment variables:
-   - `DEVICE_TOKEN` — a long random secret. **Must match the token set on
-     each device** (panel > System > Cloud > cloud token). Default
-     `esp-router-dev-token` is for local testing only.
-   - `ADMIN_TOKEN` — a long random secret for `/api/logs`, `/api/devices`
-     and `/ws/control`. If unset, those endpoints are open — set one.
+   - `ADMIN_TOKEN` — a long random secret for `/api/logs`, `/api/devices`,
+     `/api/devices/unpair` and `/ws/control`. If unset, those endpoints
+     are open — set one.
    - `PORT` — Render sets this automatically.
+   - No `DEVICE_TOKEN` anymore: devices authenticate by chip ID, so
+     there is nothing to set for them. (If an old `DEVICE_TOKEN` env var
+     is still on the service, it is ignored — you can delete it.)
 3. Note the service URL, e.g. `https://esp-router-cloud.onrender.com`.
-   On the device set Cloud base URL to exactly that (panel > System >
-   Cloud, or `POST /api/system/cloud` with `{"baseUrl": "..."}`), and the
-   cloud token to `DEVICE_TOKEN`. The device connects out to
-   `wss://<host>/link`, fetches the manifest from
-   `https://<host>/ota/manifest.json`, and posts logs to
-   `https://<host>/logs`.
+   The firmware already has this URL as its default cloud URL, so a
+   freshly flashed device connects on its own — nothing to enter in the
+   panel. The first chip ID that connects auto-pairs; afterwards only
+   that device is accepted. To pair a different device, power the old
+   one off and call `POST /api/devices/unpair` with the admin token
+   (or delete `data/devices.json` on the server and restart).
 
 Notes:
 - Render free-tier web services spin down after inactivity; the device
@@ -67,5 +77,6 @@ Notes:
   ephemeral — treat the in-memory log as the source of truth and the
   file as a best-effort backup.
 - The server never stores WiFi passwords or the admin password; the only
-  secret it checks is `DEVICE_TOKEN` (device link + log upload) and
-  `ADMIN_TOKEN` (admin reads + control socket).
+  secret it checks is `ADMIN_TOKEN` (admin reads + control socket).
+  Devices authenticate by chip ID, not by a shared secret — the paired
+  chip ID lives in `data/devices.json`.
