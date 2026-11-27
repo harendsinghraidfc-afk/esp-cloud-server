@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ESP-Router Cloud</title>
+<style>
+  body{font-family:system-ui,sans-serif;max-width:900px;margin:0 auto;padding:16px;color:#111}
+  h1{font-size:20px} h2{font-size:16px;margin-top:24px}
+  table{border-collapse:collapse;width:100%} td,th{border:1px solid #ccc;padding:6px 8px;text-align:left;font-size:13px}
+  pre{background:#111;color:#0f0;padding:10px;overflow:auto;max-height:300px;font-size:12px}
+  input,select,textarea{width:100%;padding:8px;margin:4px 0;box-sizing:border-box}
+  button{padding:8px 16px;cursor:pointer}
+  .row{display:flex;gap:8px}.row>*{flex:1}
+</style>
+</head>
+<body>
+<h1>ESP-Router Cloud</h1>
+<p>Admin token: <input id="token" type="password" placeholder="ADMIN_TOKEN (leave empty if none set)" autocomplete="off"></p>
+
+<h2>Devices</h2>
+<table><thead><tr><th>Device</th><th>Board</th><th>Version</th><th>Online</th><th>Last seen</th><th>IP</th></tr></thead>
+<tbody id="devices"><tr><td colspan="6">loading…</td></tr></tbody></table>
+
+<h2>Send command</h2>
+<div class="row">
+  <input id="device" placeholder="device hostname, e.g. esp-router">
+  <select id="command">
+    <option value="status">status</option><option value="get_stats">get_stats</option>
+    <option value="get_logs">get_logs</option><option value="reboot">reboot</option>
+    <option value="ota_check">ota_check</option><option value="ota_update">ota_update</option>
+    <option value="block_client">block_client</option><option value="unblock_client">unblock_client</option>
+    <option value="rename_client">rename_client</option><option value="set_client_limit">set_client_limit</option>
+    <option value="set_ap">set_ap</option><option value="set_wan">set_wan</option>
+    <option value="factory_reset">factory_reset (needs confirm:true)</option>
+    <option value="list_devices">list_devices (local)</option>
+  </select>
+</div>
+<textarea id="params" rows="3" placeholder='params JSON, e.g. {"mac":"AA:BB:CC:DD:EE:FF"}'></textarea>
+<button id="send">Send via control WebSocket</button>
+<pre id="result">Not connected.</pre>
+
+<h2>Recent logs</h2>
+<button id="refresh">Refresh logs</button>
+<pre id="logs">loading…</pre>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let ws = null, seq = 0;
+function adminQ() { const t = $('token').value.trim(); return t ? ('?token=' + encodeURIComponent(t)) : ''; }
+async function loadDevices() {
+  try {
+    const r = await fetch('/api/devices' + adminQ());
+    const j = await r.json();
+    $('devices').innerHTML = (j.devices || []).map(d =>
+      `<tr><td>${d.device}</td><td>${d.board || ''}</td><td>${d.version || ''}</td><td>${d.online ? 'yes' : 'no'}</td><td>${d.lastSeen || ''}</td><td>${d.ip || ''}</td></tr>`).join('') || '<tr><td colspan="6">no devices</td></tr>';
+  } catch (e) { $('devices').innerHTML = '<tr><td colspan="6">error: ' + e + '</td></tr>'; }
+}
+async function loadLogs() {
+  try {
+    const r = await fetch('/api/logs?limit=100' + (adminQ() ? '&' + adminQ().slice(1) : ''));
+    const j = await r.json();
+    $('logs').textContent = (j.logs || []).map(l => `${l.ts} [${l.level}] ${l.device} ${l.msg}`).join('\n') || 'no logs yet';
+  } catch (e) { $('logs').textContent = 'error: ' + e; }
+}
+function connectWs() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(proto + '//' + location.host + '/ws/control' + adminQ());
+  ws.onopen = () => { $('result').textContent = 'Control socket open.'; };
+  ws.onmessage = (ev) => { $('result').textContent = ev.data; };
+  ws.onclose = () => { $('result').textContent = 'Control socket closed.'; };
+  ws.onerror = () => { $('result').textContent = 'Control socket error (check admin token).'; };
+}
+$('send').onclick = () => {
+  if (!ws || ws.readyState !== 1) connectWs();
+  let params = {};
+  try { params = JSON.parse($('params').value || '{}'); } catch (e) { $('result').textContent = 'params JSON invalid: ' + e; return; }
+  const send = () => ws.send(JSON.stringify({ id: 'web' + (++seq), device: $('device').value.trim(), command: $('command').value, params }));
+  if (ws.readyState === 1) send(); else ws.onopen = () => { $('result').textContent = 'Control socket open.'; send(); };
+};
+$('refresh').onclick = loadLogs;
+$('token').onchange = () => { loadDevices(); loadLogs(); connectWs(); };
+loadDevices(); loadLogs(); connectWs();
+setInterval(() => { loadDevices(); loadLogs(); }, 10000);
+</script>
+</body>
+</html>

@@ -1,0 +1,16 @@
+# Render Blueprint - ESP-Router cloud server
+# Deploy with: connect this folder's repo to Render, or `render blueprint launch`.
+# (Render Dashboard > New > Blueprint, point it at the repo containing this file.)
+services:
+  - type: web
+    name: esp-router-cloud
+    env: node
+    region: singapore
+    plan: free
+    buildCommand: npm install
+    startCommand: node server.js
+    envVars:
+      - key: DEVICE_TOKEN
+        sync: false
+      - key: ADMIN_TOKEN
+        sync: false
