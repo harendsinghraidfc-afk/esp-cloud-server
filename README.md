@@ -18,6 +18,10 @@ firmware's `CloudLink` module, not the other way round.
 | `GET /api/logs?limit=100` | Recent logs (admin token if set) |
 | `GET /api/devices` | Online devices, paired chip ID, last-seen, board, version, IP (admin token if set) |
 | `POST /api/devices/unpair` | Clear the pairing (admin token) — next chip ID that connects pairs instead |
+| `POST /api/captures` | Device handshake-capture upload: raw bytes, `X-Device-Id` + `X-Filename` headers, `.pcap` or `.hc22000`, max 512 KB (chip-ID auth, first upload auto-pairs) |
+| `GET /api/captures` | List uploaded captures, newest first (admin token if set) |
+| `GET /api/captures/:name` | Download one capture file (admin token if set) |
+| `DELETE /api/captures/:name` | Delete one capture file (admin token if set) |
 | `WS /link` (alias `/ws/device`) | Device link: hello/auth, commands, results, alerts |
 | `WS /ws/control?token=<ADMIN_TOKEN>` | Control clients: send `{id, device, command, params}` |
 | `GET /` | Tiny admin page (devices, logs, send a command) |
@@ -25,10 +29,16 @@ firmware's `CloudLink` module, not the other way round.
 **Auth — no device token.** The device identifies itself with its unique
 chip ID (ESP32 eFuse MAC, 12 hex digits). The server auto-pairs the first
 chip ID that connects (stored in `data/devices.json`, survives restarts)
-and afterwards only accepts that chip ID on `/link`, `/logs` and
-`/ota/manifest.json`. To pair a different device, power the old one off
+and afterwards only accepts that chip ID on `/link`, `/logs`,
+`/ota/manifest.json` and `/api/captures`. To pair a different device, power the old one off
 and call `POST /api/devices/unpair` (admin token) or delete
 `data/devices.json` and restart.
+
+Capture files uploaded by the device (AP MODE V2 handshakes) are stored
+in `data/captures/` on the server filesystem. On Render's free tier that
+disk is ephemeral — files survive until the service restarts or
+redeploys; the device always keeps its local copy, so re-uploading after
+a restart is the recovery path.
 
 Firmware served right now: **version 0.3.0** (from
 `wifi/platformio.ini` `-DESP_ROUTER_VERSION="0.3.0"`).

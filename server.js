@@ -18,14 +18,16 @@
  * unique chip ID (ESP32 eFuse MAC, 12 hex digits). The server
  * auto-pairs the FIRST chip ID that connects (stored in
  * data/devices.json, survives restarts) and afterwards only accepts
- * that chip ID on /link, /logs and /ota/manifest.json (401 / socket
- * close for anything else). To pair a different device, power the old
- * one off and call POST /api/devices/unpair (admin token) or delete
- * data/devices.json and restart.
+ * that chip ID on /link, /logs, /ota/manifest.json and /api/captures
+ * (401 / socket close for anything else). To pair a different device,
+ * power the old one off and call POST /api/devices/unpair (admin token)
+ * or delete data/devices.json and restart.
  *
  * Extra admin/control surface (not used by the firmware):
  *   - GET  /health, GET /api/ota/manifest?board=, GET /firmware/:board/firmware.bin
  *   - GET  /api/logs?limit=, GET /api/devices, POST /api/devices/unpair
+ *   - POST /api/captures (device upload), GET /api/captures (admin list),
+ *     GET /api/captures/:name (admin download), DELETE /api/captures/:name
  *   - WS   /ws/device (alias of /link), WS /ws/control
  *   - GET  /  tiny admin page
  *
@@ -46,6 +48,9 @@ const ROOT = __dirname;
 const DATA_DIR = path.join(ROOT, 'data');
 const LOG_FILE = path.join(DATA_DIR, 'logs.jsonl');
 const PAIRING_FILE = path.join(DATA_DIR, 'devices.json');
+const CAPTURES_DIR = path.join(DATA_DIR, 'captures');
+const MAX_CAPTURE_SIZE = 512 * 1024; // bytes per capture file
+const CAPTURE_EXTS = ['.pcap', '.hc22000'];
 const MAX_LOGS = 1000;
 const COMMAND_TIMEOUT_MS = 30000;
 
@@ -146,6 +151,75 @@ function authorizeDevice(chipId) {
 }
 
 loadPairing();
+
+// ---------------------------------------------------------------- captures
+// AP MODE V2 handshake captures uploaded by the device
+// (POST /api/captures, raw bytes, X-Device-Id + X-Filename headers).
+// Files live in data/captures/ on the server filesystem — ephemeral on
+// Render's free tier (gone on restart/redeploy); the device always
+// keeps its local copy. The list endpoint reads the directory, so it
+// survives a server restart; captureMeta only adds the exact chip ID /
+// upload time for files uploaded in this process (on restart we fall
+// back to the file mtime and the paired chip ID).
+const captureMeta = new Map(); // name -> {chipId, uploadedAt}
+
+// Basename only, no path traversal, .pcap or .hc22000 only.
+// Returns the safe name, or '' when invalid.
+function validCaptureName(name) {
+  if (typeof name !== 'string') return '';
+  const n = name.trim();
+  if (!n || n.length > 100) return '';
+  if (n.includes('/') || n.includes('\\') || n.includes('\0')) return '';
+  if (n !== path.basename(n) || n === '.' || n === '..') return '';
+  const ext = path.extname(n).toLowerCase();
+  if (!CAPTURE_EXTS.includes(ext)) return '';
+  return n;
+}
+
+function readRawBody(req, limit = MAX_CAPTURE_SIZE) {
+  return new Promise((resolve, reject) => {
+    let size = 0;
+    const chunks = [];
+    let rejected = false;
+    req.on('data', (c) => {
+      if (rejected) return; // keep draining so the socket stays usable
+      size += c.length;
+      if (size > limit) {
+        rejected = true;
+        chunks.length = 0;
+        req.resume(); // drain the rest; caller replies 413 on rejection
+        reject(new Error('body too large'));
+        return;
+      }
+      chunks.push(c);
+    });
+    req.on('end', () => { if (!rejected) resolve(Buffer.concat(chunks)); });
+    req.on('error', reject);
+  });
+}
+
+// List captures from the directory (newest first).
+function listCaptures() {
+  let names = [];
+  try { names = fs.readdirSync(CAPTURES_DIR); } catch (e) { return []; }
+  const out = [];
+  for (const name of names) {
+    const safe = validCaptureName(name);
+    if (!safe) continue;
+    let st;
+    try { st = fs.statSync(path.join(CAPTURES_DIR, safe)); } catch (e) { continue; }
+    if (!st.isFile()) continue;
+    const meta = captureMeta.get(safe);
+    out.push({
+      name: safe,
+      size: st.size,
+      chipId: meta ? meta.chipId : (paired ? paired.chipId : null),
+      uploadedAt: meta ? meta.uploadedAt : st.mtime.toISOString(),
+    });
+  }
+  out.sort((a, b) => (a.uploadedAt < b.uploadedAt ? 1 : a.uploadedAt > b.uploadedAt ? -1 : 0));
+  return out;
+}
 
 // ---------------------------------------------------------------- helpers
 function baseUrlOf(req) {
@@ -306,6 +380,67 @@ const server = http.createServer(async (req, res) => {
       devices.clear();
       console.log(`[pair] unpaired ${old ? old.chipId : '(none)'} - pairing is open again`);
       return sendJson(res, 200, { ok: true, unpaired: old || null });
+    }
+
+    // AP MODE V2 handshake captures.
+    // Device upload: POST /api/captures, raw bytes,
+    // X-Device-Id: <chipId>, X-Filename: <name.pcap | name.hc22000>.
+    // Same pairing check as /logs — first chip ID pairs, afterwards
+    // only the paired chip ID may upload. Overwrites a same-named file.
+    if (req.method === 'POST' && p === '/api/captures') {
+      const auth = authorizeDevice(req.headers['x-device-id'] || '');
+      if (!auth.ok) return sendJson(res, 401, { ok: false, error: auth.error });
+      const name = validCaptureName(req.headers['x-filename'] || '');
+      if (!name) return sendJson(res, 400, { ok: false, error: 'invalid filename (basename only, .pcap or .hc22000)' });
+      const len = parseInt(req.headers['content-length'] || '0', 10);
+      if (len > MAX_CAPTURE_SIZE) return sendJson(res, 413, { ok: false, error: 'file too large (max 512 KB)' });
+      let buf;
+      try { buf = await readRawBody(req, MAX_CAPTURE_SIZE); }
+      catch (e) { return sendJson(res, 413, { ok: false, error: 'file too large (max 512 KB)' }); }
+      if (buf.length === 0) return sendJson(res, 400, { ok: false, error: 'empty file' });
+      const uploadedAt = new Date().toISOString();
+      try {
+        fs.mkdirSync(CAPTURES_DIR, { recursive: true });
+        fs.writeFileSync(path.join(CAPTURES_DIR, name), buf);
+      } catch (e) { return sendJson(res, 500, { ok: false, error: 'could not store capture: ' + e.message }); }
+      const rec = { name, size: buf.length, chipId: auth.chipId, uploadedAt };
+      captureMeta.set(name, { chipId: auth.chipId, uploadedAt });
+      const devName = (paired && paired.device) ? paired.device : 'esp-router';
+      storeLog({ ts: uploadedAt, device: devName, chipId: auth.chipId, version: '', seq: null, ms: null, level: 'I', msg: `[capture] ${name} (${buf.length} bytes) uploaded` });
+      broadcastControl({ type: 'capture', capture: rec });
+      console.log(`[capture] ${name} (${buf.length} bytes) from chip ${auth.chipId}`);
+      return sendJson(res, 200, { ok: true, name, size: buf.length, uploadedAt });
+    }
+
+    // Admin list (reads the directory, so it survives restarts).
+    if (req.method === 'GET' && p === '/api/captures') {
+      if (!adminOk(req, url)) return sendJson(res, 401, { ok: false, error: 'bad admin token' });
+      return sendJson(res, 200, { captures: listCaptures() });
+    }
+
+    // Admin download / delete of one capture.
+    if ((req.method === 'GET' || req.method === 'DELETE') && p.startsWith('/api/captures/')) {
+      if (!adminOk(req, url)) return sendJson(res, 401, { ok: false, error: 'bad admin token' });
+      let name = '';
+      try { name = validCaptureName(decodeURIComponent(p.slice('/api/captures/'.length))); } catch (e) { name = ''; }
+      if (!name) return sendJson(res, 400, { ok: false, error: 'invalid capture name' });
+      const file = path.join(CAPTURES_DIR, name);
+      if (req.method === 'DELETE') {
+        try { fs.unlinkSync(file); } catch (e) { return sendJson(res, 404, { ok: false, error: 'capture not found' }); }
+        captureMeta.delete(name);
+        console.log(`[capture] deleted ${name}`);
+        return sendJson(res, 200, { ok: true });
+      }
+      let st;
+      try { st = fs.statSync(file); } catch (e) { return sendJson(res, 404, { ok: false, error: 'capture not found' }); }
+      if (!st.isFile()) return sendJson(res, 404, { ok: false, error: 'capture not found' });
+      const ext = path.extname(name).toLowerCase();
+      res.writeHead(200, {
+        'Content-Type': ext === '.hc22000' ? 'text/plain; charset=utf-8' : 'application/vnd.tcpdump.pcap',
+        'Content-Length': st.size,
+        'Content-Disposition': `attachment; filename="${name}"`,
+      });
+      return fs.createReadStream(file).pipe(res);
     }
 
     return sendJson(res, 404, { ok: false, error: 'not found' });

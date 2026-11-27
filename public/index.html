@@ -44,6 +44,11 @@
 <button id="refresh">Refresh logs</button>
 <pre id="logs">loading…</pre>
 
+<h2>Captures</h2>
+<button id="refreshCaptures">Refresh captures</button>
+<table><thead><tr><th>Name</th><th>Size</th><th>Chip</th><th>Uploaded</th><th></th></tr></thead>
+<tbody id="captures"><tr><td colspan="5">loading…</td></tr></tbody></table>
+
 <script>
 const $ = (id) => document.getElementById(id);
 let ws = null, seq = 0;
@@ -78,10 +83,26 @@ $('send').onclick = () => {
   const send = () => ws.send(JSON.stringify({ id: 'web' + (++seq), device: $('device').value.trim(), command: $('command').value, params }));
   if (ws.readyState === 1) send(); else ws.onopen = () => { $('result').textContent = 'Control socket open.'; send(); };
 };
-$('refresh').onclick = loadLogs;
-$('token').onchange = () => { loadDevices(); loadLogs(); connectWs(); };
-loadDevices(); loadLogs(); connectWs();
-setInterval(() => { loadDevices(); loadLogs(); }, 10000);
+async function loadCaptures() {
+  try {
+    const r = await fetch('/api/captures' + adminQ());
+    const j = await r.json();
+    $('captures').innerHTML = (j.captures || []).map(c =>
+      `<tr><td>${c.name}</td><td>${c.size}</td><td>${c.chipId || ''}</td><td>${c.uploadedAt || ''}</td><td><a href="/api/captures/${encodeURIComponent(c.name)}${adminQ()}">Download</a> <button data-del="${c.name}">Delete</button></td></tr>`).join('') || '<tr><td colspan="5">no captures yet</td></tr>';
+  } catch (e) { $('captures').innerHTML = '<tr><td colspan="5">error: ' + e + '</td></tr>'; }
+}
+$('captures').addEventListener('click', async (ev) => {
+  const btn = ev.target.closest('button[data-del]');
+  if (!btn) return;
+  const name = btn.getAttribute('data-del');
+  if (!confirm('Delete capture ' + name + '?')) return;
+  await fetch('/api/captures/' + encodeURIComponent(name) + adminQ(), { method: 'DELETE' });
+  loadCaptures();
+});
+$('refreshCaptures').onclick = loadCaptures;
+$('token').onchange = () => { loadDevices(); loadLogs(); loadCaptures(); connectWs(); };
+loadDevices(); loadLogs(); loadCaptures(); connectWs();
+setInterval(() => { loadDevices(); loadLogs(); loadCaptures(); }, 10000);
 </script>
 </body>
 </html>

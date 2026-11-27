@@ -25,9 +25,9 @@ System > Cloud connection. It is sent:
   `POST /logs` (also accepted as `chipId` in the log-upload JSON body).
 
 The server **auto-pairs the first chip ID that connects** — on any of
-`/link`, `/logs` or `/ota/manifest.json` — stores it in
+`/link`, `/logs`, `/ota/manifest.json` or `/api/captures` — stores it in
 `data/devices.json` (`{"chipId","device","pairedAt"}`, survives restarts),
-and afterwards **only accepts that chip ID** on those three endpoints
+and afterwards **only accepts that chip ID** on those four endpoints
 (anything else gets `401` on HTTP, or `{"type":"auth","ok":false}` and a
 closed socket on `/link`).
 
@@ -175,3 +175,41 @@ need no device: `command:"list_devices"` and `command:"get_cloud_logs"`
 Control clients may also send the firmware-native format directly
 (`{"type":"command","cmd":"client_block","mac":"..."}`) — flat params are
 forwarded as-is.
+
+## 5. Handshake captures (AP MODE V2) — HTTP
+
+After a capture, the device uploads each capture file to the server
+(the local copy is always kept on the device):
+
+```
+POST <baseUrl>/api/captures
+  X-Device-Id: <chipId>
+  X-Filename: <name.pcap | name.hc22000>
+  Content-Type: application/octet-stream
+  <raw file bytes>
+```
+
+- Chip-ID auth, same as §0: the first chip ID that uploads auto-pairs;
+  afterwards only the paired chip ID may upload (anything else → `401
+  {"ok":false,"error":"unauthorized"}`).
+- Filename must be a basename only (no `/`, `\` or `..`), extension
+  `.pcap` or `.hc22000`, max 512 KB per file. A same-named file is
+  overwritten. Response: `{"ok":true,"name":...,"size":...,
+  "uploadedAt":...}` (ISO timestamp).
+- The upload is also logged as a `[capture]` log line and broadcast to
+  control clients as `{"type":"capture","capture":{name,size,chipId,
+  uploadedAt}}`.
+
+Admin (ADMIN_TOKEN required, same pattern as `/api/logs`):
+
+```
+GET    /api/captures            → {"captures":[{"name","size","chipId","uploadedAt"}]} (newest first, read from the data/captures/ directory)
+GET    /api/captures/:name      → file bytes, Content-Disposition: attachment (404 if missing)
+DELETE /api/captures/:name      → {"ok":true} (404 if missing)
+```
+
+The admin page (`GET /`) has a Captures section listing the files with
+Download and Delete buttons. **Files live in `data/captures/` on the
+server filesystem, which on Render's free tier is ephemeral — they
+survive until the service restarts or redeploys; the device always
+keeps its local copy.**
