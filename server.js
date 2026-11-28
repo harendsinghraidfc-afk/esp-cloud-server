@@ -43,7 +43,7 @@ const { WebSocketServer } = require('ws');
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || ''; // gates /ws/control + write endpoints; GET /api/logs + /api/devices are public read-only
-const VERSION = '0.3.0'; // must match -DESP_ROUTER_VERSION in wifi/platformio.ini
+const VERSION = '0.3.8'; // must match -DESP_ROUTER_VERSION in wifi/platformio.ini
 const BOARDS = ['esp32dev', 'esp32c5'];
 const ROOT = __dirname;
 const DATA_DIR = path.join(ROOT, 'data');
