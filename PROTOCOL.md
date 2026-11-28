@@ -79,7 +79,8 @@ Extra fields are the command's flat parameters. The device replies:
 
 On failure: `{"type":"result","id":"c1","ok":false,"error":"..."}`.
 `state` is present for `status`/`stats`/`logs`/`ota_check`/`ota_update`/
-`cloud_set`.
+`cloud_set`/`apmode_scan`/`apmode_status`/`apmode_captures`/`apmode_start`/
+`deauth_start`.
 
 | cmd | params | effect |
 |---|---|---|
@@ -95,6 +96,24 @@ On failure: `{"type":"result","id":"c1","ok":false,"error":"..."}`.
 | `client_limit` | `mac`, `kbps` (0=none), `capMB` (0=none) | per-client speed/data limit |
 | `ap_set` | `ssid?`, `channel?`, `channelAuto?`, `auth?` (`wpa2`/`wpa3`/`wpa2wpa3`), `band?`, `hidden?`, `maxClients?`, `password?` | AP settings, AP restarts |
 | `wan_set` | `ssid?`, `backupSsid?`, `enabled?`, `password?`, `backupPassword?` | upstream WiFi settings, reconnects |
+| `apmode_scan` | — | nearby networks (`state` = scan list: SSID, BSSID, channel, RSSI, auth); refused while a capture/deauth run is active |
+| `apmode_start` | `ssid`, `bssid`, `channel`, `deauth?` (default false) | starts a WPA handshake capture; `state.capturing` = true |
+| `apmode_stop` | — | stops a capture/deauth run; ok:false when nothing is running |
+| `apmode_status` | — | `state` = capture/deauth status (mode, target, handshake progress, files) |
+| `apmode_captures` | — | `state` = saved capture files (.pcap + .hc22000) with upload state |
+| `apmode_delete` | `file` | deletes one capture file |
+| `apmode_delete_all` | — | deletes all capture files |
+| `deauth_start` | `ssid`, `bssid`, `channel`, `clients?` (comma-separated MACs, empty = broadcast), `durationSec?` (10–600, default 120) | starts a standalone deauth run; `state.deauthing` = true. Stop/status reuse `apmode_stop` / `apmode_status`. |
+
+AP MODE V2 note: starting a **capture** pauses the router (AP + STA
+stop, radio locked to the target channel), so the cloud link drops for
+the duration of the capture and the device reconnects when the router
+is restored. A capture auto-stops on a full handshake or after the
+180 s failsafe, so the link always comes back on its own. **Deauth**
+keeps the AP up on the target channel, so the link stays usable for
+`apmode_status` / `apmode_stop` while it runs. Capture files are also
+auto-uploaded to the server (`POST /api/captures`) whenever the link
+is up — see §5.
 
 Unknown `cmd` → `{"type":"result","id":...,"ok":false,"error":"unknown command: <cmd>"}`.
 

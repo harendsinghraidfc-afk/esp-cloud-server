@@ -23,7 +23,7 @@ firmware's `CloudLink` module, not the other way round.
 | `GET /api/captures/:name` | Download one capture file (admin token if set) |
 | `DELETE /api/captures/:name` | Delete one capture file (admin token if set) |
 | `WS /link` (alias `/ws/device`) | Device link: hello/auth, commands, results, alerts |
-| `WS /ws/control?token=<ADMIN_TOKEN>` | Control clients: send `{id, device, command, params}` |
+| `WS /ws/control?token=<ADMIN_TOKEN>` | Control clients: send `{id, device, command, params}` — status/logs/reboot/OTA, client/AP/WAN control, plus AP MODE V2 + Deauth (`apmode_scan`, `apmode_start`, `apmode_stop`, `apmode_status`, `apmode_captures`, `apmode_delete`, `apmode_delete_all`, `deauth_start`; full list in PROTOCOL.md §1) |
 | `GET /` | Tiny admin page (devices, logs, send a command) |
 
 **Auth — no device token.** The device identifies itself with its unique

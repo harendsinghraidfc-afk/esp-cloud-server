@@ -472,6 +472,14 @@ const COMMAND_MAP = {
   set_ap: 'ap_set',
   set_wan: 'wan_set',
   cloud_set: 'cloud_set',
+  apmode_scan: 'apmode_scan',
+  apmode_start: 'apmode_start',
+  apmode_stop: 'apmode_stop',
+  apmode_status: 'apmode_status',
+  apmode_captures: 'apmode_captures',
+  apmode_delete: 'apmode_delete',
+  apmode_delete_all: 'apmode_delete_all',
+  deauth_start: 'deauth_start',
 };
 
 function sendCommandToDevice(deviceName, controlWs, msg) {
