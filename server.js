@@ -25,7 +25,8 @@
  *
  * Extra admin/control surface (not used by the firmware):
  *   - GET  /health, GET /api/ota/manifest?board=, GET /firmware/:board/firmware.bin
- *   - GET  /api/logs?limit=, GET /api/devices, POST /api/devices/unpair
+ *   - GET  /api/logs?limit= (public read-only), GET /api/devices (public
+ *     read-only), POST /api/devices/unpair (admin token)
  *   - POST /api/captures (device upload), GET /api/captures (admin list),
  *     GET /api/captures/:name (admin download), DELETE /api/captures/:name
  *   - WS   /ws/device (alias of /link), WS /ws/control
@@ -41,7 +42,7 @@ const crypto = require('crypto');
 const { WebSocketServer } = require('ws');
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
-const ADMIN_TOKEN = process.env.ADMIN_TOKEN || ''; // empty = /api/logs + /api/devices + /ws/control open (dev only)
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN || ''; // gates /ws/control + write endpoints; GET /api/logs + /api/devices are public read-only
 const VERSION = '0.3.0'; // must match -DESP_ROUTER_VERSION in wifi/platformio.ini
 const BOARDS = ['esp32dev', 'esp32c5'];
 const ROOT = __dirname;
@@ -356,14 +357,14 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { ok: true, stored: lines.length });
     }
 
+    // Public read-only: the admin page shows recent logs without a token.
     if (req.method === 'GET' && p === '/api/logs') {
-      if (!adminOk(req, url)) return sendJson(res, 401, { ok: false, error: 'bad admin token' });
       const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') || '100', 10) || 100, 1), MAX_LOGS);
       return sendJson(res, 200, { logs: logs.slice(-limit) });
     }
 
+    // Public read-only: the admin page shows devices without a token.
     if (req.method === 'GET' && p === '/api/devices') {
-      if (!adminOk(req, url)) return sendJson(res, 401, { ok: false, error: 'bad admin token' });
       return sendJson(res, 200, { devices: publicDevices(), paired: paired || null });
     }
 

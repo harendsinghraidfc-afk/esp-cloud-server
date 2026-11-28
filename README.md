@@ -15,8 +15,8 @@ firmware's `CloudLink` module, not the other way round.
 | `GET /api/ota/manifest?board=esp32dev\|esp32c5` | Same manifest for one board (admin use) |
 | `GET /firmware/:board/firmware.bin` | Firmware binary download (open — the firmware is public) |
 | `POST /logs` / `POST /api/logs` | Device log upload (chip-ID auth: `X-Device-Id` header or `chipId` in body) |
-| `GET /api/logs?limit=100` | Recent logs (admin token if set) |
-| `GET /api/devices` | Online devices, paired chip ID, last-seen, board, version, IP (admin token if set) |
+| `GET /api/logs?limit=100` | Recent logs (public, read-only) |
+| `GET /api/devices` | Online devices, paired chip ID, last-seen, board, version, IP (public, read-only) |
 | `POST /api/devices/unpair` | Clear the pairing (admin token) — next chip ID that connects pairs instead |
 | `POST /api/captures` | Device handshake-capture upload: raw bytes, `X-Device-Id` + `X-Filename` headers, `.pcap` or `.hc22000`, max 512 KB (chip-ID auth, first upload auto-pairs) |
 | `GET /api/captures` | List uploaded captures, newest first (admin token if set) |
@@ -63,9 +63,10 @@ ADMIN_TOKEN=admin-secret PORT=3000 npm start
    `render.yaml` in this folder — service `esp-router-cloud`, Node, free
    plan, Singapore region, build `npm install`, start `node server.js`).
 2. In the Render service settings set environment variables:
-   - `ADMIN_TOKEN` — a long random secret for `/api/logs`, `/api/devices`,
-     `/api/devices/unpair` and `/ws/control`. If unset, those endpoints
-     are open — set one.
+   - `ADMIN_TOKEN` — a long random secret for `/api/devices/unpair`,
+     `/api/captures` (list/download/delete) and `/ws/control`. If unset,
+     those endpoints are open — set one. (`GET /api/logs` and
+     `GET /api/devices` are public read-only and do not need it.)
    - `PORT` — Render sets this automatically.
    - No `DEVICE_TOKEN` anymore: devices authenticate by chip ID, so
      there is nothing to set for them. (If an old `DEVICE_TOKEN` env var
@@ -87,6 +88,7 @@ Notes:
   ephemeral — treat the in-memory log as the source of truth and the
   file as a best-effort backup.
 - The server never stores WiFi passwords or the admin password; the only
-  secret it checks is `ADMIN_TOKEN` (admin reads + control socket).
+  secret it checks is `ADMIN_TOKEN` (control socket + write endpoints).
+  `GET /api/logs` and `GET /api/devices` are public read-only.
   Devices authenticate by chip ID, not by a shared secret — the paired
   chip ID lives in `data/devices.json`.

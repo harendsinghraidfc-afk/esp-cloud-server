@@ -35,8 +35,8 @@ To pair a **different device**: power the old device off first (otherwise
 it re-pairs on reconnect), then either delete `data/devices.json` and
 restart the server, or call `POST /api/devices/unpair` with the admin
 token — that clears the pairing and drops the live link, so the next chip
-ID that connects pairs instead. `GET /api/devices` (admin token) shows
-the currently paired chip ID.
+ID that connects pairs instead. `GET /api/devices` (public, read-only)
+shows the currently paired chip ID.
 
 ## 1. Live link — WebSocket
 
@@ -200,7 +200,7 @@ POST <baseUrl>/api/captures
   control clients as `{"type":"capture","capture":{name,size,chipId,
   uploadedAt}}`.
 
-Admin (ADMIN_TOKEN required, same pattern as `/api/logs`):
+Admin (ADMIN_TOKEN required):
 
 ```
 GET    /api/captures            → {"captures":[{"name","size","chipId","uploadedAt"}]} (newest first, read from the data/captures/ directory)
